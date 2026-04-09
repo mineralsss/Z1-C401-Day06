@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sqlite3
 import sys
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -144,6 +146,15 @@ def _normalize_day(day: str) -> str:
     return text
 
 
+def _normalize_text(value: str) -> str:
+    text = (value or "").strip().lower()
+    text = text.replace("đ", "d").replace("Đ", "D")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 @tool
 def get_nearest_branch(location: str = "VinUni, Gia Lam, Ha Noi", max_results: int = 3) -> str:
     """Return nearest branch names with distances from an input location."""
@@ -188,12 +199,17 @@ def get_nearest_branch(location: str = "VinUni, Gia Lam, Ha Noi", max_results: i
 def get_suitable_availibility_doctor(day: str, shift: str, specialty: str = "", facility: str = "") -> str:
     """Return suitable available doctors for a given day, shift, and optional specialty/facility."""
     normalized_day = _normalize_day(day)
+    shift_filter = (shift or "").strip().lower()
     specialty_filter = (specialty or "").strip().lower()
+    specialty_filter_norm = _normalize_text(specialty or "")
     facility_filter = (facility or "").strip().lower()
+    facility_filter_norm = _normalize_text(facility or "")
     query = """
     SELECT
     d.doctor_id,
     d.full_name AS doctor_name,
+    d.degrees,
+    d.qualification,
     f.facility_id,
     f.name AS facility_name,
     sch.shift,
@@ -213,7 +229,10 @@ def get_suitable_availibility_doctor(day: str, shift: str, specialty: str = "", 
     LEFT JOIN specialties sp
         ON sp.specialty_id = ds.specialty_id
     WHERE v.slot_date = ?
-    AND sch.shift = ?
+    AND (
+        (? = 'full_day' AND sch.shift IN ('morning', 'afternoon'))
+        OR (? != 'full_day' AND sch.shift = ?)
+    )
     AND d.is_active = 1
     AND sch.status = 'active'
     AND (
@@ -226,7 +245,7 @@ def get_suitable_availibility_doctor(day: str, shift: str, specialty: str = "", 
         OR LOWER(f.name) LIKE '%' || ? || '%'
         OR LOWER(COALESCE(f.normalized_name, '')) LIKE '%' || ? || '%'
     )
-    GROUP BY d.doctor_id, d.full_name, f.facility_id, f.name, sch.shift
+    GROUP BY d.doctor_id, d.full_name, d.degrees, d.qualification, f.facility_id, f.name, sch.shift
     ORDER BY available_slot_count DESC, first_available_time ASC;
     """
     try:
@@ -268,13 +287,15 @@ def get_suitable_availibility_doctor(day: str, shift: str, specialty: str = "", 
                 query,
                 (
                     normalized_day,
-                    shift,
+                    shift_filter,
+                    shift_filter,
+                    shift_filter,
                     specialty_filter,
                     specialty_filter,
-                    specialty_filter,
+                    specialty_filter_norm,
                     facility_filter,
                     facility_filter,
-                    facility_filter,
+                    facility_filter_norm,
                 ),
             )
             rows = cursor.fetchall()
@@ -285,9 +306,19 @@ def get_suitable_availibility_doctor(day: str, shift: str, specialty: str = "", 
             if facility_filter:
                 extra_parts.append(f"co so '{facility}'")
             extra = ", " + ", ".join(extra_parts) if extra_parts else ""
-            return f"Khong tim thay bac si nao co lich trong ngay {normalized_day}, ca {shift}{extra}."
+            with sqlite3.connect(DB_PATH) as connection:
+                cursor = connection.cursor()
+                min_day, max_day = cursor.execute(
+                    "SELECT MIN(slot_date), MAX(slot_date) FROM doctor_schedule_slots WHERE status = 'available'"
+                ).fetchone()
+            if min_day and max_day:
+                return (
+                    f"Khong tim thay bac si nao co lich trong ngay {normalized_day}, ca {shift_filter}{extra}. "
+                    f"Du lieu lich hien co tu {min_day} den {max_day}."
+                )
+            return f"Khong tim thay bac si nao co lich trong ngay {normalized_day}, ca {shift_filter}{extra}."
         return "\n".join(
-            f"{row[1]} | {row[3]} | {row[4]} | slots: {row[5]} | {row[6]}-{row[7]} | {row[8] or 'N/A'}"
+            f"{row[1]} | degree: {row[2] or 'N/A'} | qualification: {row[3] or 'N/A'} | {row[5]} | {row[6]} | slots: {row[7]} | {row[8]}-{row[9]} | {row[10] or 'N/A'}"
             for row in rows
         )
     except sqlite3.Error as exc:
@@ -323,11 +354,15 @@ def get_all_specialties(facility: str) -> str:
             JOIN doctors d ON d.doctor_id = ds.doctor_id
             JOIN doctor_schedules sch ON sch.doctor_id = d.doctor_id
             JOIN facilities f ON f.facility_id = sch.facility_id
-            WHERE f.name LIKE '%' || ? || '%'
+            WHERE (
+                LOWER(COALESCE(f.name, '')) LIKE '%' || ? || '%'
+                OR LOWER(COALESCE(f.normalized_name, '')) LIKE '%' || ? || '%'
+            )
             AND d.is_active = 1
             AND sch.status = 'active';
             """
-            cursor.execute(query, (facility.strip().lower(),))
+            facility_filter = facility.strip().lower()
+            cursor.execute(query, (facility_filter, facility_filter))
             rows = cursor.fetchall()
         if not rows:
             return f"Khong tim thay chuyen khoa nao trong co so '{facility}'."
@@ -351,17 +386,18 @@ for path in DB_CANDIDATES:
 if DB_PATH is None:
     raise FileNotFoundError("Database file not found")
 
+
 @tool
 def get_doctor_schedule(doctor_name: str) -> str:
     """
     Trả về lịch làm việc của bác sĩ dựa trên tên.
-    Input: tên bác sĩ (nhập đúng và đủ tên bác sĩ, tiếng Việt)
-    Output: danh sách ca làm việc với trạng thái slot còn trống hay đã đặt
+    Input: tên bác sĩ (có thể nhập một phần tên, tiếng Việt)
+    Output: danh sách ca làm việc với trạng thái còn chỗ hay hết chỗ
     """
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Tìm bác sĩ khớp tên (không phân biệt hoa thường)
     cursor.execute("""
         SELECT DISTINCT d.doctor_id, d.full_name
         FROM doctors d
@@ -376,18 +412,17 @@ def get_doctor_schedule(doctor_name: str) -> str:
 
     result = []
 
-    for doctor_id, full_name in doctors:
+    for doc in doctors:
+        doctor_id = doc["doctor_id"]
+        full_name = doc["full_name"]
         result.append(f"📅 Lịch làm việc của bác sĩ {full_name}:\n")
 
         cursor.execute("""
-            SELECT ds.work_date, ds.shift, ds.start_at, ds.end_at, ds.status,
-                   COUNT(s.slot_id) as total_slots,
-                   SUM(CASE WHEN s.status = 'available' THEN 1 ELSE 0 END) as available_slots
-            FROM doctor_schedules ds
-            LEFT JOIN doctor_schedule_slots s ON s.schedule_id = ds.schedule_id
-            WHERE ds.doctor_id = ?
-            GROUP BY ds.schedule_id
-            ORDER BY ds.work_date, ds.start_at
+            SELECT schedule_id, work_date, shift,
+                   max_bookings, booked_count, status
+            FROM doctor_schedules
+            WHERE doctor_id = ?
+            ORDER BY work_date
         """, (doctor_id,))
 
         schedules = cursor.fetchall()
@@ -397,17 +432,13 @@ def get_doctor_schedule(doctor_name: str) -> str:
             continue
 
         for row in schedules:
-            work_date, shift, start_at, end_at, status, total, available = row
-            available = available or 0
-            booked = total - available
+            available = row["max_bookings"] - row["booked_count"]
             slot_status = "✅ Còn chỗ" if available > 0 else "❌ Hết chỗ"
             result.append(
-                f"  - Ngày: {work_date} | Ca: {shift} "
-                f"| Giờ: {start_at} - {end_at} "
-                f"| Còn trống: {available}/{total} (Đã đặt: {booked}) "
+                f"  - Ngày: {row['work_date']} | Ca: {row['shift']} "
+                f"| Còn trống: {available}/{row['max_bookings']} "
                 f"| {slot_status}"
             )
-
         result.append("")
 
     conn.close()
@@ -436,7 +467,6 @@ def confirm_appointment_summary(
         preferred_time: Thời gian mong muốn đặt lịch
         note: Ghi chú thêm (triệu chứng, yêu cầu đặc biệt,...)
     """
-    # Kiểm tra các trường bắt buộc
     missing = []
     if not full_name.strip():
         missing.append("Họ tên")
@@ -451,12 +481,12 @@ def confirm_appointment_summary(
 
     if missing:
         return (
-            f"⚠️ Còn thiếu thông tin sau để hoàn tất đặt lịch:\n"
+            f"⚠️ Còn thiếu thông tin:\n"
             + "\n".join(f"  - {m}" for m in missing)
             + "\n\nVui lòng cung cấp thêm để tiếp tục."
         )
 
-    summary = f"""
+    return f"""
 ✅ Xác nhận thông tin đặt lịch khám tại Vinmec:
 
 - Họ tên:               {full_name}
@@ -467,9 +497,7 @@ def confirm_appointment_summary(
 - Ghi chú:             {note if note.strip() else "Không có"}
 
 📌 Vui lòng xác nhận lại thông tin trên. Nếu chính xác, chúng tôi sẽ tiến hành đặt lịch cho bạn.
-"""
-    return summary.strip()
-
+""".strip()
 
 
 @tool
@@ -485,7 +513,7 @@ def book_appointment(
 ) -> str:
     """
     Đặt lịch khám và cập nhật database khi user xác nhận.
-    Tìm slot trống phù hợp → tạo user nếu chưa có → tạo appointment → cập nhật slot.
+    Tìm schedule còn chỗ → tạo user nếu chưa có → tạo appointment → tăng booked_count.
 
     Args:
         full_name: Họ tên bệnh nhân
@@ -523,41 +551,40 @@ def book_appointment(
         specialty_row = cursor.fetchone()
         specialty_id = specialty_row["specialty_id"] if specialty_row else None
 
-        # ── 3. Tìm slot available ────────────────────────────────────
+        # ── 3. Tìm schedule còn chỗ ──────────────────────────────────
         cursor.execute("""
             SELECT
-                s.slot_id, s.schedule_id, s.doctor_id,
-                s.slot_date, s.start_at, s.end_at,
+                ds.schedule_id, ds.doctor_id,
+                ds.work_date, ds.shift,
+                ds.max_bookings, ds.booked_count,
                 d.full_name as doctor_name,
                 d.price_local, d.price_foreigner
-            FROM doctor_schedule_slots s
-            JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id
-            JOIN doctors d ON s.doctor_id = d.doctor_id
-            WHERE s.slot_date = ?
+            FROM doctor_schedules ds
+            JOIN doctors d ON ds.doctor_id = d.doctor_id
+            WHERE ds.work_date = ?
               AND ds.shift = ?
               AND ds.facility_id = ?
-              AND s.status = 'available'
-            ORDER BY s.start_at
+              AND ds.booked_count < ds.max_bookings
+              AND ds.status = 'active'
+            ORDER BY ds.schedule_id
             LIMIT 1
         """, (preferred_date, shift, facility_id))
-        slot = cursor.fetchone()
+        schedule = cursor.fetchone()
 
-        if not slot:
+        if not schedule:
             return (
-                f"❌ Không còn slot trống vào ngày {preferred_date} "
+                f"❌ Không còn chỗ trống vào ngày {preferred_date} "
                 f"ca {shift} tại {facility_name}.\n"
                 f"Vui lòng chọn ngày hoặc ca khác."
             )
 
-        slot_id     = slot["slot_id"]
-        doctor_id   = slot["doctor_id"]
-        doctor_name = slot["doctor_name"]
-        fee = slot["price_local"] if nationality_type == "local" else slot["price_foreigner"]
+        schedule_id = schedule["schedule_id"]
+        doctor_id   = schedule["doctor_id"]
+        doctor_name = schedule["doctor_name"]
+        fee = schedule["price_local"] if nationality_type == "local" else schedule["price_foreigner"]
 
         # ── 4. Tạo / lấy user ───────────────────────────────────────
-        cursor.execute("""
-            SELECT user_id FROM users WHERE phone = ? LIMIT 1
-        """, (phone,))
+        cursor.execute("SELECT user_id FROM users WHERE phone = ? LIMIT 1", (phone,))
         user_row = cursor.fetchone()
 
         if user_row:
@@ -573,22 +600,22 @@ def book_appointment(
         cursor.execute("""
             INSERT INTO appointments (
                 user_id, doctor_id, facility_id, specialty_id,
-                slot_id, symptom_text, nationality_type,
+                schedule_id, symptom_text, nationality_type,
                 consultation_fee, status, confirmed_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', CURRENT_TIMESTAMP)
         """, (
             user_id, doctor_id, facility_id, specialty_id,
-            slot_id, symptom_text, nationality_type, fee
+            schedule_id, symptom_text, nationality_type, fee
         ))
         appointment_id = cursor.lastrowid
 
-        # ── 6. Cập nhật slot → booked ────────────────────────────────
+        # ── 6. Tăng booked_count ─────────────────────────────────────
         cursor.execute("""
-            UPDATE doctor_schedule_slots
-            SET status = 'booked'
-            WHERE slot_id = ?
-        """, (slot_id,))
+            UPDATE doctor_schedules
+            SET booked_count = booked_count + 1
+            WHERE schedule_id = ?
+        """, (schedule_id,))
 
         conn.commit()
 
@@ -601,8 +628,8 @@ def book_appointment(
 - Bác sĩ:          {doctor_name}
 - Chuyên khoa:     {specialty}
 - Cơ sở Vinmec:    {facility_name}
-- Ngày khám:       {slot['slot_date']}
-- Giờ khám:        {slot['start_at']} - {slot['end_at']}
+- Ngày khám:       {schedule['work_date']}
+- Ca khám:         {schedule['shift']}
 - Chi phí:         {fee:,} VNĐ
 - Triệu chứng:     {symptom_text or 'Không có'}
 

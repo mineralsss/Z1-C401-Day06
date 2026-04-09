@@ -10,7 +10,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage
-from tools import get_nearest_branch, get_suitable_availibility_doctor, get_today_date, get_all_specialties, tools_list, get_doctor_profile
+from tools import get_nearest_branch, get_suitable_availibility_doctor, get_today_date, get_all_specialties, get_doctor_schedule, confirm_appointment_summary, book_appointment, get_doctor_profile
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,7 +24,7 @@ class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
 
 # 3. Khởi tạo LLM và Tools
-tools_list = [get_doctor_profile, get_nearest_branch, get_suitable_availibility_doctor, get_today_date, get_all_specialties]
+tools_list = [get_doctor_schedule, confirm_appointment_summary, book_appointment,get_doctor_profile, get_nearest_branch, get_suitable_availibility_doctor, get_today_date, get_all_specialties]
 llm = ChatOpenAI(model="gpt-4o-mini")
 llm_with_tools = llm.bind_tools(tools_list)
 
