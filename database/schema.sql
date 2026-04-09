@@ -63,55 +63,41 @@ CREATE TABLE IF NOT EXISTS doctor_specialties (
 );
 
 CREATE TABLE IF NOT EXISTS doctor_schedules (
-    schedule_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    doctor_id INTEGER NOT NULL,
-    facility_id INTEGER NOT NULL,
-    work_date TEXT NOT NULL,
-    shift TEXT NOT NULL CHECK (shift IN ('morning', 'afternoon', 'evening', 'full_day', 'custom')),
-    start_at TEXT NOT NULL,
-    end_at TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled')),
-    note TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    schedule_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    doctor_id       INTEGER NOT NULL,
+    facility_id     INTEGER NOT NULL,
+    work_date       TEXT NOT NULL,
+    shift           TEXT NOT NULL CHECK (shift IN ('morning', 'afternoon')),
+    max_bookings    INTEGER NOT NULL DEFAULT 50,
+    booked_count    INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled', 'full')),
+    note            TEXT,
+    created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (doctor_id) REFERENCES doctors(doctor_id),
     FOREIGN KEY (facility_id) REFERENCES facilities(facility_id),
-    UNIQUE (doctor_id, work_date, shift, start_at, end_at)
-);
-
-CREATE TABLE IF NOT EXISTS doctor_schedule_slots (
-    slot_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    schedule_id INTEGER NOT NULL,
-    doctor_id INTEGER NOT NULL,
-    slot_date TEXT NOT NULL,
-    start_at TEXT NOT NULL,
-    end_at TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'available' CHECK (status IN ('available', 'booked', 'blocked', 'completed', 'cancelled')),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (schedule_id) REFERENCES doctor_schedules(schedule_id),
-    FOREIGN KEY (doctor_id) REFERENCES doctors(doctor_id),
-    UNIQUE (doctor_id, start_at, end_at)
+    UNIQUE (doctor_id, facility_id, work_date, shift)
 );
 
 CREATE TABLE IF NOT EXISTS appointments (
-    appointment_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    doctor_id INTEGER NOT NULL,
-    facility_id INTEGER NOT NULL,
-    specialty_id INTEGER,
-    slot_id INTEGER NOT NULL UNIQUE,
-    symptom_text TEXT,
-    booking_note TEXT,
+    appointment_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id          INTEGER NOT NULL,
+    doctor_id        INTEGER NOT NULL,
+    facility_id      INTEGER NOT NULL,
+    specialty_id     INTEGER,
+    schedule_id      INTEGER NOT NULL,
+    symptom_text     TEXT,
+    booking_note     TEXT,
     nationality_type TEXT CHECK (nationality_type IN ('local', 'foreigner') OR nationality_type IS NULL),
     consultation_fee INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('pending', 'confirmed', 'completed', 'cancelled', 'no_show')),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    confirmed_at TEXT,
-    cancelled_at TEXT,
+    status           TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('pending', 'confirmed', 'completed', 'cancelled', 'no_show')),
+    created_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    confirmed_at     TEXT,
+    cancelled_at     TEXT,
     FOREIGN KEY (user_id) REFERENCES users(user_id),
     FOREIGN KEY (doctor_id) REFERENCES doctors(doctor_id),
     FOREIGN KEY (facility_id) REFERENCES facilities(facility_id),
     FOREIGN KEY (specialty_id) REFERENCES specialties(specialty_id),
-    FOREIGN KEY (slot_id) REFERENCES doctor_schedule_slots(slot_id)
+    FOREIGN KEY (schedule_id) REFERENCES doctor_schedules(schedule_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone);
@@ -121,31 +107,51 @@ CREATE INDEX IF NOT EXISTS idx_specialties_normalized_name ON specialties(normal
 CREATE INDEX IF NOT EXISTS idx_doctors_normalized_name ON doctors(normalized_name);
 CREATE INDEX IF NOT EXISTS idx_doctors_facility ON doctors(facility_id);
 CREATE INDEX IF NOT EXISTS idx_doctor_schedules_doctor_date ON doctor_schedules(doctor_id, work_date);
-CREATE INDEX IF NOT EXISTS idx_slots_doctor_date_status ON doctor_schedule_slots(doctor_id, slot_date, status);
 CREATE INDEX IF NOT EXISTS idx_appointments_user_status ON appointments(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_appointments_doctor_status ON appointments(doctor_id, status);
+CREATE INDEX IF NOT EXISTS idx_appointments_schedule ON appointments(schedule_id);
 
-CREATE VIEW IF NOT EXISTS vw_available_slots AS
+-- Trả về các ca còn chỗ đặt (booked_count < max_bookings)
+CREATE VIEW IF NOT EXISTS vw_available_schedules AS
 SELECT
-    slot.slot_id,
-    slot.schedule_id,
-    slot.doctor_id,
-    doc.full_name AS doctor_name,
-    sched.facility_id,
-    fac.name AS facility_name,
-    slot.slot_date,
-    slot.start_at,
-    slot.end_at,
-    slot.status
-FROM doctor_schedule_slots AS slot
-JOIN doctor_schedules AS sched
-    ON sched.schedule_id = slot.schedule_id
-JOIN doctors AS doc
-    ON doc.doctor_id = slot.doctor_id
-JOIN facilities AS fac
-    ON fac.facility_id = sched.facility_id
-LEFT JOIN appointments AS appt
-    ON appt.slot_id = slot.slot_id
-    AND appt.status IN ('pending', 'confirmed')
-WHERE slot.status = 'available'
-  AND appt.appointment_id IS NULL;
+    s.schedule_id,
+    s.doctor_id,
+    d.full_name        AS doctor_name,
+    s.facility_id,
+    f.name             AS facility_name,
+    s.work_date,
+    s.shift,
+    s.max_bookings,
+    s.booked_count,
+    (s.max_bookings - s.booked_count) AS remaining_slots
+FROM doctor_schedules s
+JOIN doctors    d ON d.doctor_id    = s.doctor_id
+JOIN facilities f ON f.facility_id  = s.facility_id
+WHERE s.status = 'active'
+  AND s.booked_count < s.max_bookings;
+
+-- Trả về toàn bộ lịch sử đặt khám kèm thông tin đầy đủ
+CREATE VIEW IF NOT EXISTS vw_appointment_detail AS
+SELECT
+    a.appointment_id,
+    a.status           AS appointment_status,
+    a.created_at       AS booked_at,
+    u.user_id,
+    u.full_name        AS patient_name,
+    u.phone,
+    d.doctor_id,
+    d.full_name        AS doctor_name,
+    f.name             AS facility_name,
+    sp.name            AS specialty_name,
+    s.work_date,
+    s.shift,
+    a.nationality_type,
+    a.consultation_fee,
+    a.symptom_text,
+    a.booking_note
+FROM appointments a
+JOIN users            u  ON u.user_id      = a.user_id
+JOIN doctors          d  ON d.doctor_id    = a.doctor_id
+JOIN facilities       f  ON f.facility_id  = a.facility_id
+JOIN doctor_schedules s  ON s.schedule_id  = a.schedule_id
+LEFT JOIN specialties sp ON sp.specialty_id = a.specialty_id;

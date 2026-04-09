@@ -16,13 +16,7 @@ Mặc định tạo DB tại `data/vinmec.sqlite`.
 python scripts/import_data.py
 ```
 
-Tùy chọn đổi độ dài slot (mặc định 30 phút):
-
-```bash
-python scripts/import_data.py --slot-minutes 20
-```
-
-Các tham số khác:
+Các tham số:
 
 | Tham số | Mặc định |
 |---|---|
@@ -41,7 +35,6 @@ Các tham số khác:
 | `doctors` | 524 |
 | `doctor_specialties` | 447 |
 | `doctor_schedules` | 4348 |
-| `doctor_schedule_slots` | 34784 |
 | `users` | 0 |
 | `appointments` | 0 |
 
@@ -105,29 +98,23 @@ Bảng nối `doctors` ↔ `specialties`.
 
 ### `doctor_schedules`
 
-Mỗi dòng là một ca làm việc của bác sĩ.
+Mỗi dòng là một ca làm việc (sáng hoặc chiều) của bác sĩ trong một ngày.
 
 | Cột | Ghi chú |
 |---|---|
 | `doctor_id`, `facility_id` | |
 | `work_date` | Ngày làm việc |
-| `shift` | `morning` / `afternoon` / `evening` / `full_day` / `custom` |
-| `start_at`, `end_at` | Giờ bắt đầu/kết thúc ca |
-| `status` | `active` / `cancelled` |
+| `shift` | `morning` / `afternoon` |
+| `max_bookings` | Số chỗ tối đa, mặc định 50 |
+| `booked_count` | Số người đã đặt, tăng/giảm theo appointment |
+| `status` | `active` / `cancelled` / `full` |
 
-Unique key: `(doctor_id, work_date, shift, start_at, end_at)`.
+Unique key: `(doctor_id, facility_id, work_date, shift)`.
 
-### `doctor_schedule_slots`
-
-Slot nhỏ sinh ra từ `doctor_schedules` (mặc định 30 phút/slot).
-
-| Cột | Ghi chú |
-|---|---|
-| `schedule_id`, `doctor_id` | |
-| `slot_date`, `start_at`, `end_at` | |
-| `status` | `available` / `booked` / `blocked` / `completed` / `cancelled` |
-
-Unique key: `(doctor_id, start_at, end_at)`.
+Logic đặt lịch:
+- Chỉ cho đặt khi `booked_count < max_bookings`
+- Sau khi đặt thành công: `booked_count + 1`, nếu đầy thì `status = 'full'`
+- Khi huỷ appointment: `booked_count - 1`, `status` về `active`
 
 ### `appointments`
 
@@ -136,15 +123,19 @@ Lịch hẹn đã đặt.
 | Cột | Ghi chú |
 |---|---|
 | `user_id`, `doctor_id`, `facility_id`, `specialty_id` | |
-| `slot_id` | FK → `doctor_schedule_slots`, unique |
+| `schedule_id` | FK → `doctor_schedules` |
 | `symptom_text`, `booking_note` | |
 | `nationality_type` | Xác định giá khám |
 | `consultation_fee` | Phí tại thời điểm đặt |
 | `status` | `pending` / `confirmed` / `completed` / `cancelled` / `no_show` |
 
-### View `vw_available_slots`
+### View `vw_available_schedules`
 
-Trả về slot còn trống: `status = 'available'` và chưa có appointment `pending/confirmed`.
+Trả về các ca còn chỗ đặt (`status = 'active'` và `booked_count < max_bookings`), kèm số chỗ còn lại (`remaining_slots`). Dùng để agent tra cứu lịch trống khi người dùng muốn đặt khám.
+
+### View `vw_appointment_detail`
+
+Trả về toàn bộ thông tin chi tiết của một lịch hẹn: thông tin bệnh nhân, bác sĩ, cơ sở, chuyên khoa, ca làm việc, phí khám. Dùng để tra cứu lịch sử đặt khám hoặc hiển thị chi tiết cho người dùng.
 
 ---
 
@@ -200,6 +191,10 @@ score = len(degrees) + len(speciality) + len(description) + len(qualification)
 
 Có 4 trường hợp trùng tên đã được resolve theo rule này.
 
-### 5. Sinh slot từ ca làm việc
+### 5. Logic đặt lịch theo ca
 
-Mỗi `doctor_schedules` được tách thành các slot nhỏ liên tiếp (mặc định 30 phút) lưu vào `doctor_schedule_slots`. Slot cuối bị bỏ nếu không đủ độ dài.
+Mỗi ca (`doctor_schedules`) có `max_bookings = 50` chỗ. Khi đặt lịch:
+1. Kiểm tra `booked_count < max_bookings`
+2. Insert appointment → `UPDATE doctor_schedules SET booked_count = booked_count + 1`
+3. Nếu `booked_count = max_bookings` → `status = 'full'`
+4. Khi huỷ → `booked_count - 1`, `status = 'active'`
