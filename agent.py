@@ -5,7 +5,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage
-from tools import search_flights, search_hotels, calculate_budget
+from tools import tools_list
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,7 +19,6 @@ class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
 
 # 3. Khởi tạo LLM và Tools
-tools_list = [search_flights, search_hotels, calculate_budget]
 llm = ChatOpenAI(model="gpt-4o-mini")
 llm_with_tools = llm.bind_tools(tools_list)
 

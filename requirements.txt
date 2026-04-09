@@ -1,0 +1,8 @@
+langgraph
+langchain-openai
+langchain-core
+typing-extensions
+python-dotenv
+pandas
+numpy
+scikit-learn
