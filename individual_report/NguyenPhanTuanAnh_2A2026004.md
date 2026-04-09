@@ -24,7 +24,7 @@ Conversational AI Engineer (Prompt Egnineering & LangGraph Workflow Designer)
 - Trước khi làm hackathon chỉ sử dụng langgraph nhưng ở mức độ không có fallback về một node phía trước khi một node fail, sau hackathon thu thập được kiến thức mới.
 
 ## 6. Nếu làm lại
-Sẽ làm toàn bộ dự án sớm hơn, sẽ bắt đầu từ tối D5 vì kế hoạch ban đầu đề ra có nhiều chức năng, có frontend, backend có tích hợp OCR hỗ trợ trích xuất thông tin CCCD/BHYT, và hỗ trợ Android Auto / Apple Carplay cho đặt lịch chế độ rảnh tay qua Siri / Gemini
+Sẽ làm toàn bộ dự án sớm hơn, sẽ bắt đầu từ tối D5 vì kế hoạch ban đầu đề ra có nhiều chức năng, có frontend, backend có tích hợp OCR hỗ trợ trích xuất thông tin CCCD/BHYT, và hỗ trợ Android Auto / Apple Carplay cho đặt lịch chế độ rảnh tay qua Siri / Gemini nhưng cuối cùng không còn thời gian làm vì team tốn quá nhiều thời gian vẽ kế hoạch và chia phân công công việc vào buổi sáng nên mất luôn khoảng thời gian làm buổi sáng
 
 ## 7. AI giúp gì / AI sai gì
 - **Giúp:** dùng Gemini để phác thảo ý tưởng những tool cần viết, giúp phác thảo ROI, hỗ trợ format lại các ý tưởng và lời nói thô thành format báo cáo
