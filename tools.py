@@ -293,6 +293,11 @@ def get_suitable_availibility_doctor(day: str, shift: str, specialty: str = "", 
     except sqlite3.Error as exc:
         return f"Co loi xay ra khi truy van database: {exc}"
 
+@tool
+def get_today_date() -> str:
+    """Return today's date in YYYY-MM-DD format."""
+    return datetime.now().strftime("%Y-%m-%d")
+
 if __name__ == "__main__":
     day = "2026-04-09"
     shift = "morning"

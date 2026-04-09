@@ -42,6 +42,7 @@ FACILITY_COORDINATES_BY_KEY = {
     "da nang": (16.0387756, 108.2112996),
     "can tho": (10.0260810, 105.7699584),
     "ocean park 2": (20.9396981, 105.9899806),
+    "grand park": (20.9907222, 105.9560000),
 }
 
 SPECIALTY_ALIAS_TO_MASTER = {
