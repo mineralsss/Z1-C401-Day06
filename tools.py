@@ -351,17 +351,18 @@ for path in DB_CANDIDATES:
 if DB_PATH is None:
     raise FileNotFoundError("Database file not found")
 
+
 @tool
 def get_doctor_schedule(doctor_name: str) -> str:
     """
     Trả về lịch làm việc của bác sĩ dựa trên tên.
-    Input: tên bác sĩ (nhập đúng và đủ tên bác sĩ, tiếng Việt)
-    Output: danh sách ca làm việc với trạng thái slot còn trống hay đã đặt
+    Input: tên bác sĩ (có thể nhập một phần tên, tiếng Việt)
+    Output: danh sách ca làm việc với trạng thái còn chỗ hay hết chỗ
     """
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Tìm bác sĩ khớp tên (không phân biệt hoa thường)
     cursor.execute("""
         SELECT DISTINCT d.doctor_id, d.full_name
         FROM doctors d
@@ -376,18 +377,17 @@ def get_doctor_schedule(doctor_name: str) -> str:
 
     result = []
 
-    for doctor_id, full_name in doctors:
+    for doc in doctors:
+        doctor_id = doc["doctor_id"]
+        full_name = doc["full_name"]
         result.append(f"📅 Lịch làm việc của bác sĩ {full_name}:\n")
 
         cursor.execute("""
-            SELECT ds.work_date, ds.shift, ds.start_at, ds.end_at, ds.status,
-                   COUNT(s.slot_id) as total_slots,
-                   SUM(CASE WHEN s.status = 'available' THEN 1 ELSE 0 END) as available_slots
-            FROM doctor_schedules ds
-            LEFT JOIN doctor_schedule_slots s ON s.schedule_id = ds.schedule_id
-            WHERE ds.doctor_id = ?
-            GROUP BY ds.schedule_id
-            ORDER BY ds.work_date, ds.start_at
+            SELECT schedule_id, work_date, shift,
+                   max_bookings, booked_count, status
+            FROM doctor_schedules
+            WHERE doctor_id = ?
+            ORDER BY work_date
         """, (doctor_id,))
 
         schedules = cursor.fetchall()
@@ -397,17 +397,13 @@ def get_doctor_schedule(doctor_name: str) -> str:
             continue
 
         for row in schedules:
-            work_date, shift, start_at, end_at, status, total, available = row
-            available = available or 0
-            booked = total - available
+            available = row["max_bookings"] - row["booked_count"]
             slot_status = "✅ Còn chỗ" if available > 0 else "❌ Hết chỗ"
             result.append(
-                f"  - Ngày: {work_date} | Ca: {shift} "
-                f"| Giờ: {start_at} - {end_at} "
-                f"| Còn trống: {available}/{total} (Đã đặt: {booked}) "
+                f"  - Ngày: {row['work_date']} | Ca: {row['shift']} "
+                f"| Còn trống: {available}/{row['max_bookings']} "
                 f"| {slot_status}"
             )
-
         result.append("")
 
     conn.close()
@@ -436,7 +432,6 @@ def confirm_appointment_summary(
         preferred_time: Thời gian mong muốn đặt lịch
         note: Ghi chú thêm (triệu chứng, yêu cầu đặc biệt,...)
     """
-    # Kiểm tra các trường bắt buộc
     missing = []
     if not full_name.strip():
         missing.append("Họ tên")
@@ -451,12 +446,12 @@ def confirm_appointment_summary(
 
     if missing:
         return (
-            f"⚠️ Còn thiếu thông tin sau để hoàn tất đặt lịch:\n"
+            f"⚠️ Còn thiếu thông tin:\n"
             + "\n".join(f"  - {m}" for m in missing)
             + "\n\nVui lòng cung cấp thêm để tiếp tục."
         )
 
-    summary = f"""
+    return f"""
 ✅ Xác nhận thông tin đặt lịch khám tại Vinmec:
 
 - Họ tên:               {full_name}
@@ -467,9 +462,7 @@ def confirm_appointment_summary(
 - Ghi chú:             {note if note.strip() else "Không có"}
 
 📌 Vui lòng xác nhận lại thông tin trên. Nếu chính xác, chúng tôi sẽ tiến hành đặt lịch cho bạn.
-"""
-    return summary.strip()
-
+""".strip()
 
 
 @tool
@@ -485,7 +478,7 @@ def book_appointment(
 ) -> str:
     """
     Đặt lịch khám và cập nhật database khi user xác nhận.
-    Tìm slot trống phù hợp → tạo user nếu chưa có → tạo appointment → cập nhật slot.
+    Tìm schedule còn chỗ → tạo user nếu chưa có → tạo appointment → tăng booked_count.
 
     Args:
         full_name: Họ tên bệnh nhân
@@ -523,41 +516,40 @@ def book_appointment(
         specialty_row = cursor.fetchone()
         specialty_id = specialty_row["specialty_id"] if specialty_row else None
 
-        # ── 3. Tìm slot available ────────────────────────────────────
+        # ── 3. Tìm schedule còn chỗ ──────────────────────────────────
         cursor.execute("""
             SELECT
-                s.slot_id, s.schedule_id, s.doctor_id,
-                s.slot_date, s.start_at, s.end_at,
+                ds.schedule_id, ds.doctor_id,
+                ds.work_date, ds.shift,
+                ds.max_bookings, ds.booked_count,
                 d.full_name as doctor_name,
                 d.price_local, d.price_foreigner
-            FROM doctor_schedule_slots s
-            JOIN doctor_schedules ds ON s.schedule_id = ds.schedule_id
-            JOIN doctors d ON s.doctor_id = d.doctor_id
-            WHERE s.slot_date = ?
+            FROM doctor_schedules ds
+            JOIN doctors d ON ds.doctor_id = d.doctor_id
+            WHERE ds.work_date = ?
               AND ds.shift = ?
               AND ds.facility_id = ?
-              AND s.status = 'available'
-            ORDER BY s.start_at
+              AND ds.booked_count < ds.max_bookings
+              AND ds.status = 'active'
+            ORDER BY ds.schedule_id
             LIMIT 1
         """, (preferred_date, shift, facility_id))
-        slot = cursor.fetchone()
+        schedule = cursor.fetchone()
 
-        if not slot:
+        if not schedule:
             return (
-                f"❌ Không còn slot trống vào ngày {preferred_date} "
+                f"❌ Không còn chỗ trống vào ngày {preferred_date} "
                 f"ca {shift} tại {facility_name}.\n"
                 f"Vui lòng chọn ngày hoặc ca khác."
             )
 
-        slot_id     = slot["slot_id"]
-        doctor_id   = slot["doctor_id"]
-        doctor_name = slot["doctor_name"]
-        fee = slot["price_local"] if nationality_type == "local" else slot["price_foreigner"]
+        schedule_id = schedule["schedule_id"]
+        doctor_id   = schedule["doctor_id"]
+        doctor_name = schedule["doctor_name"]
+        fee = schedule["price_local"] if nationality_type == "local" else schedule["price_foreigner"]
 
         # ── 4. Tạo / lấy user ───────────────────────────────────────
-        cursor.execute("""
-            SELECT user_id FROM users WHERE phone = ? LIMIT 1
-        """, (phone,))
+        cursor.execute("SELECT user_id FROM users WHERE phone = ? LIMIT 1", (phone,))
         user_row = cursor.fetchone()
 
         if user_row:
@@ -573,22 +565,22 @@ def book_appointment(
         cursor.execute("""
             INSERT INTO appointments (
                 user_id, doctor_id, facility_id, specialty_id,
-                slot_id, symptom_text, nationality_type,
+                schedule_id, symptom_text, nationality_type,
                 consultation_fee, status, confirmed_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', CURRENT_TIMESTAMP)
         """, (
             user_id, doctor_id, facility_id, specialty_id,
-            slot_id, symptom_text, nationality_type, fee
+            schedule_id, symptom_text, nationality_type, fee
         ))
         appointment_id = cursor.lastrowid
 
-        # ── 6. Cập nhật slot → booked ────────────────────────────────
+        # ── 6. Tăng booked_count ─────────────────────────────────────
         cursor.execute("""
-            UPDATE doctor_schedule_slots
-            SET status = 'booked'
-            WHERE slot_id = ?
-        """, (slot_id,))
+            UPDATE doctor_schedules
+            SET booked_count = booked_count + 1
+            WHERE schedule_id = ?
+        """, (schedule_id,))
 
         conn.commit()
 
@@ -601,8 +593,8 @@ def book_appointment(
 - Bác sĩ:          {doctor_name}
 - Chuyên khoa:     {specialty}
 - Cơ sở Vinmec:    {facility_name}
-- Ngày khám:       {slot['slot_date']}
-- Giờ khám:        {slot['start_at']} - {slot['end_at']}
+- Ngày khám:       {schedule['work_date']}
+- Ca khám:         {schedule['shift']}
 - Chi phí:         {fee:,} VNĐ
 - Triệu chứng:     {symptom_text or 'Không có'}
 
