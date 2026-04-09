@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+import os
 import re
 import sqlite3
 import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +29,20 @@ FACILITY_PREFIXES = (
     "phong kham da khoa quoc te vinmec ",
     "phong kham dkqt vinmec ",
 )
+
+FACILITY_COORDINATES_BY_KEY = {
+    "times city": (20.9938194, 105.8671963),
+    "smart city": (21.0079133, 105.7471695),
+    "central park": (10.7940524, 106.7203681),
+    "ha long": (20.9520499, 107.0719397),
+    "hai phong": (20.8232825, 106.6879856),
+    "nha trang": (12.2126502, 109.2107161),
+    "phu quoc": (10.3366819, 103.8566615),
+    "da nang": (16.0387756, 108.2112996),
+    "can tho": (10.0260810, 105.7699584),
+    "ocean park 2": (20.9396981, 105.9899806),
+    "grand park": (10.8433056, 106.8425000),
+}
 
 SPECIALTY_ALIAS_TO_MASTER = {
     "gay me": "gay me dieu tri dau",
@@ -67,6 +86,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--facilities", type=Path, default=DEFAULT_FACILITIES_CSV)
     parser.add_argument("--specialties", type=Path, default=DEFAULT_SPECIALTIES_CSV)
     parser.add_argument("--schedules", type=Path, default=DEFAULT_SCHEDULES_CSV)
+    parser.add_argument(
+        "--google-api-key",
+        type=str,
+        default=os.getenv("GOOGLE_API_KEY", ""),
+        help="Google Geocoding API key used by geocoder.google (or set GOOGLE_API_KEY env var).",
+    )
     return parser.parse_args()
 
 
@@ -119,6 +144,76 @@ def extract_province(address: str | None) -> str | None:
             continue
         return part
     return None
+
+
+def geocode_google_facility(
+    facility_name: str,
+    address: str | None,
+    api_key: str,
+) -> tuple[float | None, float | None]:
+    """Resolve latitude/longitude for a facility with provider fallback."""
+
+    key = facility_lookup_key(facility_name)
+    known = FACILITY_COORDINATES_BY_KEY.get(key)
+    if known is not None:
+        return known
+
+    try:
+        import geocoder
+    except ImportError:
+        geocoder = None
+
+    query_candidates = [candidate for candidate in (address, facility_name) if candidate]
+
+    if api_key and geocoder is not None:
+        for query in query_candidates:
+            full_query = f"{query}, Viet Nam"
+            try:
+                result = geocoder.google(full_query, key=api_key)
+            except Exception:
+                continue
+            if result and result.ok and result.latlng:
+                lat, lng = result.latlng
+                try:
+                    return (float(lat), float(lng))
+                except (TypeError, ValueError):
+                    continue
+
+    for query in query_candidates:
+        request_query = urllib.parse.urlencode(
+            {
+                "name": f"{query}, Viet Nam",
+                "count": 1,
+                "language": "en",
+                "format": "json",
+            }
+        )
+        url = f"https://geocoding-api.open-meteo.com/v1/search?{request_query}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "vinmec-importer/1.0",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=8) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, ValueError, KeyError):
+            continue
+
+        results = payload.get("results") or []
+        if not results:
+            continue
+        first = results[0]
+        lat = first.get("latitude")
+        lng = first.get("longitude")
+        try:
+            return (float(lat), float(lng))
+        except (TypeError, ValueError):
+            continue
+
+    return (None, None)
 
 
 def split_specialties(value: str | None) -> list[str]:
@@ -196,6 +291,8 @@ def upsert_facility(
     name: str,
     address: str | None,
     province: str | None,
+    latitude: float | None,
+    longitude: float | None,
 ) -> int:
     normalized_name = normalize_text(name)
     existing = connection.execute(
@@ -205,15 +302,26 @@ def upsert_facility(
 
     if existing is None:
         cursor = connection.execute(
-            "INSERT INTO facilities (name, normalized_name, address, province) VALUES (?, ?, ?, ?)",
-            (name, normalized_name, address, province),
+            """
+            INSERT INTO facilities (name, normalized_name, address, province, latitude, longitude)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (name, normalized_name, address, province, latitude, longitude),
         )
         summary.facilities_created += 1
         return int(cursor.lastrowid)
 
     connection.execute(
-        "UPDATE facilities SET name = ?, address = COALESCE(?, address), province = COALESCE(?, province) WHERE facility_id = ?",
-        (name, address, province, existing["facility_id"]),
+        """
+        UPDATE facilities
+        SET name = ?,
+            address = COALESCE(?, address),
+            province = COALESCE(?, province),
+            latitude = COALESCE(?, latitude),
+            longitude = COALESCE(?, longitude)
+        WHERE facility_id = ?
+        """,
+        (name, address, province, latitude, longitude, existing["facility_id"]),
     )
     summary.facilities_updated += 1
     return int(existing["facility_id"])
@@ -224,12 +332,22 @@ def get_or_create_facility(
     summary: ImportSummary,
     facility_key_to_id: dict[str, int],
     site_name: str,
+    google_api_key: str,
 ) -> int:
     key = facility_lookup_key(site_name)
     facility_id = facility_key_to_id.get(key)
     if facility_id is not None:
         return facility_id
-    facility_id = upsert_facility(connection, summary, name=site_name, address=None, province=None)
+    latitude, longitude = geocode_google_facility(site_name, None, google_api_key)
+    facility_id = upsert_facility(
+        connection,
+        summary,
+        name=site_name,
+        address=None,
+        province=None,
+        latitude=latitude,
+        longitude=longitude,
+    )
     facility_key_to_id[key] = facility_id
     return facility_id
 
@@ -375,13 +493,23 @@ def import_facilities(
     connection: sqlite3.Connection,
     summary: ImportSummary,
     facilities_csv: Path,
+    google_api_key: str,
 ) -> dict[str, int]:
     facility_key_to_id: dict[str, int] = {}
     for row in load_csv_rows(facilities_csv):
         name = clean_name(row.get("name"))
         address = clean_nullable_text(row.get("address"))
         province = extract_province(address)
-        facility_id = upsert_facility(connection, summary, name=name, address=address, province=province)
+        latitude, longitude = geocode_google_facility(name, address, google_api_key)
+        facility_id = upsert_facility(
+            connection,
+            summary,
+            name=name,
+            address=address,
+            province=province,
+            latitude=latitude,
+            longitude=longitude,
+        )
         facility_key_to_id[facility_lookup_key(name)] = facility_id
     return facility_key_to_id
 
@@ -407,12 +535,19 @@ def import_doctors(
     doctors_csv: Path,
     facility_key_to_id: dict[str, int],
     specialty_lookup: dict[str, int],
+    google_api_key: str,
 ) -> dict[str, list[dict]]:
     doctor_name_candidates: dict[str, list[dict]] = defaultdict(list)
 
     for row in load_csv_rows(doctors_csv):
         full_name = clean_name(row.get("name"))
-        facility_id = get_or_create_facility(connection, summary, facility_key_to_id, clean_name(row.get("vinmec_site")))
+        facility_id = get_or_create_facility(
+            connection,
+            summary,
+            facility_key_to_id,
+            clean_name(row.get("vinmec_site")),
+            google_api_key,
+        )
 
         doctor_id = upsert_doctor(
             connection, summary,
@@ -500,10 +635,20 @@ def main() -> None:
 
     try:
         with connection:
-            facility_key_to_id = import_facilities(connection, summary, args.facilities.resolve())
+            facility_key_to_id = import_facilities(
+                connection,
+                summary,
+                args.facilities.resolve(),
+                args.google_api_key.strip(),
+            )
             specialty_lookup = import_specialties(connection, summary, args.specialties.resolve())
             doctor_name_candidates = import_doctors(
-                connection, summary, args.doctors.resolve(), facility_key_to_id, specialty_lookup,
+                connection,
+                summary,
+                args.doctors.resolve(),
+                facility_key_to_id,
+                specialty_lookup,
+                args.google_api_key.strip(),
             )
             import_schedules(connection, summary, args.schedules.resolve(), doctor_name_candidates)
 

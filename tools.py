@@ -185,7 +185,7 @@ def get_nearest_branch(location: str = "VinUni, Gia Lam, Ha Noi", max_results: i
         return "Toa do dau vao khong hop le."
 
 @tool
-def get_suitable_availibility(day: str, shift: str, specialty: str = "", facility: str = "") -> str:
+def get_suitable_availibility_doctor(day: str, shift: str, specialty: str = "", facility: str = "") -> str:
     """Return suitable available doctors for a given day, shift, and optional specialty/facility."""
     normalized_day = _normalize_day(day)
     specialty_filter = (specialty or "").strip().lower()
@@ -293,16 +293,40 @@ def get_suitable_availibility(day: str, shift: str, specialty: str = "", facilit
     except sqlite3.Error as exc:
         return f"Co loi xay ra khi truy van database: {exc}"
 
+@tool
+def get_today_date() -> str:
+    """Return today's date in YYYY-MM-DD format."""
+    return datetime.now().strftime("%Y-%m-%d")
+
+@tool
+def get_all_specialties(facility: str) -> str:
+    """Return a list of all specialties in that facility."""
+    try:
+        with sqlite3.connect(DB_PATH) as connection:
+            cursor = connection.cursor()
+            query = """
+            SELECT DISTINCT sp.name
+            FROM specialties sp
+            JOIN doctor_specialties ds ON ds.specialty_id = sp.specialty_id
+            JOIN doctors d ON d.doctor_id = ds.doctor_id
+            JOIN doctor_schedules sch ON sch.doctor_id = d.doctor_id
+            JOIN facilities f ON f.facility_id = sch.facility_id
+            WHERE f.name LIKE '%' || ? || '%'
+            AND d.is_active = 1
+            AND sch.status = 'active';
+            """
+            cursor.execute(query, (facility.strip().lower(),))
+            rows = cursor.fetchall()
+        if not rows:
+            return f"Khong tim thay chuyen khoa nao trong co so '{facility}'."
+        return "\n".join(row[0] for row in rows)
+    except sqlite3.Error as exc:
+        return f"Co loi xay ra khi truy van database: {exc}"
+
+
 if __name__ == "__main__":
     day = "2026-04-09"
     shift = "morning"
     specialty = "tim mach"
     facility = "times city"
-    if hasattr(get_suitable_availibility, "invoke"):
-        print(
-            get_suitable_availibility.invoke(
-                {"day": day, "shift": shift, "specialty": specialty, "facility": facility}
-            )
-        )
-    else:
-        print(get_suitable_availibility(day, shift, specialty, facility))
+    print(get_all_specialties.invoke(facility))
