@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS doctor_schedules (
     shift           TEXT NOT NULL CHECK (shift IN ('morning', 'afternoon')),
     max_bookings    INTEGER NOT NULL DEFAULT 50,
     booked_count    INTEGER NOT NULL DEFAULT 0,
-    status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled', 'full')),
+    status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled')),
     note            TEXT,
     created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (doctor_id) REFERENCES doctors(doctor_id),

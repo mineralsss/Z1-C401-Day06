@@ -127,7 +127,7 @@ Mỗi dòng là một ca làm việc (sáng hoặc chiều) của bác sĩ trong
 | `shift` | `morning` / `afternoon` |
 | `max_bookings` | Số chỗ tối đa, mặc định 50 |
 | `booked_count` | Số người đã đặt, tăng/giảm theo appointment |
-| `status` | `active` / `cancelled` / `full` |
+| `status` | `active` / `cancelled` — dùng để đánh dấu ca bị huỷ, không liên quan đến việc đầy chỗ |
 
 Unique key: `(doctor_id, facility_id, work_date, shift)`.
 
