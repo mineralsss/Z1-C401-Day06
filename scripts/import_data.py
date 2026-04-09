@@ -13,10 +13,10 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = ROOT_DIR / "data" / "vinmec.sqlite"
-DEFAULT_DOCTORS_CSV = ROOT_DIR / "danh_sach_bac_si.csv"
-DEFAULT_FACILITIES_CSV = ROOT_DIR / "danh_sach_co_so.csv"
-DEFAULT_SPECIALTIES_CSV = ROOT_DIR / "chuyen_khoa.csv"
-DEFAULT_SCHEDULES_CSV = ROOT_DIR / "doctor_schedule.csv"
+DEFAULT_DOCTORS_CSV = ROOT_DIR / "data_csv" / "danh_sach_bac_si.csv"
+DEFAULT_FACILITIES_CSV = ROOT_DIR / "data_csv" / "danh_sach_co_so.csv"
+DEFAULT_SPECIALTIES_CSV = ROOT_DIR / "data_csv" / "chuyen_khoa.csv"
+DEFAULT_SCHEDULES_CSV = ROOT_DIR / "data_csv" / "doctor_schedule.csv"
 
 FACILITY_PREFIXES = (
     "benh vien da khoa quoc te vinmec ",
